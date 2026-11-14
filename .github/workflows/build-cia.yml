@@ -16,6 +16,7 @@ jobs:
     env:
       DEVKITPRO: /opt/devkitpro
       DEVKITARM: /opt/devkitpro/devkitARM
+      CTRULIB: /opt/devkitpro/libctru
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install helper packages
@@ -63,11 +64,25 @@ jobs:
 
       - name: Build bannertool
         run: |
-          git clone --depth 1 --recursive https://github.com/Steveice10/bannertool.git bannertool-src
-          make -C bannertool-src
-          bin="$(find bannertool-src -type f -name bannertool -perm -u+x | head -n1)"
-          [ -n "$bin" ] || { echo "bannertool binary not found after building"; exit 1; }
-          install -m 755 "$bin" "$DEVKITPRO/tools/bin/bannertool"
+          # The original bannertool repository is no longer reachable, so this uses a maintained copy,
+          # pinned to the version that was tested, and compiles it directly with g++.
+          git init bannertool-src
+          cd bannertool-src
+          git remote add origin https://github.com/carstene1ns/3ds-bannertool.git
+          git fetch --depth 1 origin 734d33be79fd3f8c29c6296158f06ac7c5ca9dcb
+          git checkout --detach FETCH_HEAD
+          obj="$(mktemp -d)"
+          flags="-std=c++17 -O2 -Isource -Isource/pc"
+          for f in stb_image stb_vorbis dr_wav; do
+            g++ $flags -c "source/pc/$f.cpp" -o "$obj/$f.o"
+          done
+          defs='-DVERSION="1.2.3" -DSTBI_ONLY_PNG -DSTBI_NO_LINEAR -DSTBI_NO_STDIO -DSTB_VORBIS_NO_PUSHDATA_API -DSTB_VORBIS_NO_STDIO -DDR_WAV_NO_STDIO'
+          for f in main log types utils 3ds/cbmd 3ds/cwav 3ds/lz11; do
+            g++ $flags $defs -c "source/$f.cpp" -o "$obj/$(echo "$f" | tr / _).o"
+          done
+          mkdir -p "$DEVKITPRO/tools/bin"
+          g++ "$obj"/*.o -o "$DEVKITPRO/tools/bin/bannertool"
+          "$DEVKITPRO/tools/bin/bannertool" 2>&1 | head -3 || true
 
       - name: Compile the client
         run: |
