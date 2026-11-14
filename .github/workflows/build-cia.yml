@@ -19,20 +19,44 @@ jobs:
       DEVKITARM: /opt/devkitpro/devkitARM
       CTRULIB: /opt/devkitpro/libctru
     steps:
-      - name: Install helper packages
+      - name: Check build tools
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            python3 curl unzip ca-certificates git make gcc g++ zlib1g-dev
+          # The devkitPro image already includes all of these; this only installs anything that is missing.
+          missing=""
+          for t in git make gcc g++ python3; do
+            command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+          done
+          if [ -n "$missing" ]; then
+            echo "Installing missing tools:$missing"
+            apt-get update
+            apt-get install -y --no-install-recommends git make gcc g++ python3 ca-certificates
+          fi
 
       - uses: actions/checkout@v4
 
-      - name: Install 3DS libraries and tools
+      - name: Check 3DS libraries and tools
         run: |
-          PM="$(command -v dkp-pacman || command -v pacman)"
-          "$PM" -Syu --noconfirm --needed 3ds-dev
-          test -f "$DEVKITARM/3ds_rules"
-          test -f "$DEVKITPRO/libctru/lib/libcitro3d.a"
+          # The devkitPro image already includes the 3DS libraries and tools. Only download them
+          # (from devkitPro's package server, which sometimes refuses requests) if something is missing.
+          have_all() {
+            [ -f "$DEVKITARM/3ds_rules" ] &&
+            [ -f "$DEVKITPRO/libctru/lib/libcitro3d.a" ] &&
+            [ -x "$DEVKITPRO/tools/bin/picasso" ] &&
+            [ -x "$DEVKITPRO/tools/bin/3dsxtool" ] &&
+            [ -x "$DEVKITPRO/tools/bin/smdhtool" ]
+          }
+          if have_all; then
+            echo "3DS libraries and tools are already installed."
+          else
+            PM="$(command -v dkp-pacman || command -v pacman)"
+            for attempt in 1 2 3 4; do
+              "$PM" -Sy --noconfirm --needed 3ds-dev && break
+              echo "Package server refused the request (attempt $attempt). Waiting before trying again..."
+              sleep $((attempt * 30))
+            done
+            have_all
+          fi
+          ls "$DEVKITPRO/tools/bin"
 
       - name: Build makerom
         run: |
