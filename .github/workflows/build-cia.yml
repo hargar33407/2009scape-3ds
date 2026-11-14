@@ -1,1 +1,90 @@
+name: Build CIA
 
+# Builds the 3DS client and packages it as an installable .cia.
+# Start it from the Actions tab with "Run workflow". The result appears at the bottom of the run
+# page under Artifacts as "rs3ds-client" (a zip containing the .cia and a .3dsx).
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install helper packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3 curl jq unzip ca-certificates git make gcc g++ zlib1g-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install 3DS libraries and tools
+        run: |
+          PM="$(command -v dkp-pacman || command -v pacman)"
+          "$PM" -Syu --noconfirm --needed 3ds-dev
+          test -f "$DEVKITARM/3ds_rules"
+          test -f "$DEVKITPRO/libctru/lib/libcitro3d.a"
+
+      - name: Get makerom
+        run: |
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/3DSGuy/Project_CTR/releases?per_page=40" -o releases.json
+          url="$(jq -r '[.[] | select(.tag_name | startswith("makerom")) | .assets[]
+                  | select(.name | test("ubuntu|linux"; "i"))
+                  | select(.name | test("x86_64|amd64|x64"; "i"))][0].browser_download_url // empty' releases.json)"
+          if [ -z "$url" ]; then
+            echo "No Linux x86_64 makerom download found. Makerom assets seen:"
+            jq -r '.[] | select(.tag_name | startswith("makerom")) | .tag_name + "  " + (.assets[].name)' releases.json
+            exit 1
+          fi
+          echo "Using $url"
+          mkdir -p makerom-dl && cd makerom-dl
+          f="$(basename "$url")"
+          curl -fsSL -o "$f" "$url"
+          case "$f" in
+            *.zip) unzip -o "$f" ;;
+            *.tar.gz|*.tgz) tar xzf "$f" ;;
+            *.tar.xz) tar xJf "$f" ;;
+            *.tar.bz2) tar xjf "$f" ;;
+            *) cp "$f" makerom ;;
+          esac
+          bin="$(find . -type f -name makerom | head -n1)"
+          [ -n "$bin" ] || { echo "makerom binary not found after extracting $f"; ls -R; exit 1; }
+          mkdir -p "$DEVKITPRO/tools/bin"
+          install -m 755 "$bin" "$DEVKITPRO/tools/bin/makerom"
+
+      - name: Build bannertool
+        run: |
+          git clone --depth 1 --recursive https://github.com/Steveice10/bannertool.git bannertool-src
+          make -C bannertool-src
+          bin="$(find bannertool-src -type f -name bannertool -perm -u+x | head -n1)"
+          [ -n "$bin" ] || { echo "bannertool binary not found after building"; exit 1; }
+          install -m 755 "$bin" "$DEVKITPRO/tools/bin/bannertool"
+
+      - name: Compile the client
+        run: |
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
+          make -C app
+
+      - name: Package the CIA
+        run: |
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
+          bash app/cia/build.sh
+          test -s app/rs3ds_client.cia
+          ls -la app/rs3ds_client.cia app/rs3ds_client.3dsx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rs3ds-client
+          path: |
+            app/rs3ds_client.cia
+            app/rs3ds_client.3dsx
+          if-no-files-found: error
