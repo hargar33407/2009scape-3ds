@@ -3,6 +3,7 @@ name: Build CIA
 # Builds the 3DS client and packages it as an installable .cia.
 # Start it from the Actions tab with "Run workflow". The result appears at the bottom of the run
 # page under Artifacts as "rs3ds-client" (a zip containing the .cia and a .3dsx).
+# If a step fails, the error text is also printed on the run's front page (the Summary).
 on:
   workflow_dispatch:
 
@@ -17,13 +18,12 @@ jobs:
       DEVKITPRO: /opt/devkitpro
       DEVKITARM: /opt/devkitpro/devkitARM
       CTRULIB: /opt/devkitpro/libctru
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install helper packages
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            python3 curl jq unzip ca-certificates git make gcc g++ zlib1g-dev
+            python3 curl unzip ca-certificates git make gcc g++ zlib1g-dev
 
       - uses: actions/checkout@v4
 
@@ -34,33 +34,19 @@ jobs:
           test -f "$DEVKITARM/3ds_rules"
           test -f "$DEVKITPRO/libctru/lib/libcitro3d.a"
 
-      - name: Get makerom
+      - name: Build makerom
         run: |
-          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/3DSGuy/Project_CTR/releases?per_page=40" -o releases.json
-          url="$(jq -r '[.[] | select(.tag_name | startswith("makerom")) | .assets[]
-                  | select(.name | test("ubuntu|linux"; "i"))
-                  | select(.name | test("x86_64|amd64|x64"; "i"))][0].browser_download_url // empty' releases.json)"
-          if [ -z "$url" ]; then
-            echo "No Linux x86_64 makerom download found. Makerom assets seen:"
-            jq -r '.[] | select(.tag_name | startswith("makerom")) | .tag_name + "  " + (.assets[].name)' releases.json
-            exit 1
-          fi
-          echo "Using $url"
-          mkdir -p makerom-dl && cd makerom-dl
-          f="$(basename "$url")"
-          curl -fsSL -o "$f" "$url"
-          case "$f" in
-            *.zip) unzip -o "$f" ;;
-            *.tar.gz|*.tgz) tar xzf "$f" ;;
-            *.tar.xz) tar xJf "$f" ;;
-            *.tar.bz2) tar xjf "$f" ;;
-            *) cp "$f" makerom ;;
-          esac
-          bin="$(find . -type f -name makerom | head -n1)"
-          [ -n "$bin" ] || { echo "makerom binary not found after extracting $f"; ls -R; exit 1; }
+          # Built from source (release 0.19.0) so it always matches this container's system libraries.
+          git init makerom-src
+          cd makerom-src
+          git remote add origin https://github.com/3DSGuy/Project_CTR.git
+          git fetch --depth 1 origin tag makerom-v0.19.0
+          git checkout --detach makerom-v0.19.0
+          make -C makerom deps -j4
+          make -C makerom -j4
           mkdir -p "$DEVKITPRO/tools/bin"
-          install -m 755 "$bin" "$DEVKITPRO/tools/bin/makerom"
+          install -m 755 makerom/bin/makerom "$DEVKITPRO/tools/bin/makerom"
+          "$DEVKITPRO/tools/bin/makerom" 2>&1 | head -3 || true
 
       - name: Build bannertool
         run: |
@@ -87,12 +73,26 @@ jobs:
       - name: Compile the client
         run: |
           export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
-          make -C app
+          set +e
+          make -C app 2>&1 | tee compile.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            { echo '### Compiling the client failed (last 60 lines)'; echo '```'; tail -n 60 compile.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
 
       - name: Package the CIA
         run: |
           export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
-          bash app/cia/build.sh
+          set +e
+          bash app/cia/build.sh 2>&1 | tee package.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            { echo '### Packaging the CIA failed (last 60 lines)'; echo '```'; tail -n 60 package.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
           test -s app/rs3ds_client.cia
           ls -la app/rs3ds_client.cia app/rs3ds_client.3dsx
 
